@@ -1,0 +1,17 @@
+spec:
+  name: remove-bg-api
+  services:
+    - name: api
+      environment_slug: python
+      instance_size_slug: basic-xxs
+      region: fra
+      dockerfile_path: Dockerfile
+      source_dir: .
+      http_port: 8080
+      routes:
+        - path: /
+      github:
+        # Auto-deploy on push; fill in your repo details when connecting
+        branch: master
+        deploy_on_push: true
+
