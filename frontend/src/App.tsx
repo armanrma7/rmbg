@@ -1,6 +1,6 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
+const API_BASE = import.meta.env.VITE_API_BASE || localStorage.getItem('apiBase') || 'http://localhost:8080'
 
 async function downscaleImage(file: File, maxSide: number): Promise<File> {
   const img = new Image()
@@ -37,7 +37,10 @@ export default function App() {
   const [resultUrl, setResultUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [crop, setCrop] = useState(false)
-  const [maxSide, setMaxSide] = useState<number>(1024)
+  const [maxSide, setMaxSide] = useState<number>(() => Number(localStorage.getItem('maxSide')) || 1600)
+  const [preset, setPreset] = useState<'fast'|'balanced'|'quality'>(() => (localStorage.getItem('preset') as any) || 'quality')
+  const [apiBase, setApiBase] = useState<string>(API_BASE)
+  const [theme, setTheme] = useState<'light'|'dark'>(() => (localStorage.getItem('theme') as any) || 'light')
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   const canSubmit = useMemo(() => !!file && !isLoading, [file, isLoading])
@@ -58,6 +61,14 @@ export default function App() {
     inputRef.current?.value && (inputRef.current.value = '')
   }
 
+  useEffect(() => {
+    localStorage.setItem('maxSide', String(maxSide))
+    localStorage.setItem('preset', preset)
+    localStorage.setItem('apiBase', apiBase)
+    localStorage.setItem('theme', theme)
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+  }, [maxSide, preset, apiBase, theme])
+
   const onSubmit = async () => {
     if (!file) return
     setIsLoading(true)
@@ -66,7 +77,17 @@ export default function App() {
       const prepared = await downscaleImage(file, maxSide)
       const form = new FormData()
       form.append('file', prepared)
-      const url = `${API_BASE}/remove-bg?crop=${crop ? 'true' : 'false'}`
+      const params = new URLSearchParams({
+        crop: String(crop),
+        preset,
+        max_side: String(maxSide),
+        refine: 'true',
+        boost_dark_edges: 'true',
+        despill_edges: 'true',
+        edge_contract: '2',
+        edge_feather: '1.6'
+      })
+      const url = `${apiBase}/remove-bg?${params.toString()}`
       const res = await fetch(url, {
         method: 'POST',
         body: form,
@@ -83,59 +104,64 @@ export default function App() {
   }
 
   return (
-    <div style={{ maxWidth: 720, margin: '40px auto', padding: 16, fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial' }}>
-      <h1 style={{ marginBottom: 8 }}>Remove Background</h1>
-      <p style={{ color: '#555', marginTop: 0 }}>Upload an image and get a transparent PNG. Optionally crop the transparent borders.</p>
+    <div className="max-w-6xl mx-auto p-6">
+      <header className="flex flex-wrap items-center gap-3 justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Remove Background</h1>
+        <div className="flex flex-wrap gap-2 items-center">
+          <input className="border rounded px-2 py-1 text-sm w-64" placeholder="API base" value={apiBase} onChange={e=>setApiBase(e.target.value)} />
+          <select className="border rounded px-2 py-1 text-sm" value={preset} onChange={e=>setPreset(e.target.value as any)}>
+            <option value="fast">Fast</option>
+            <option value="balanced">Balanced</option>
+            <option value="quality">Quality</option>
+          </select>
+          <label className="flex items-center gap-2 text-sm">
+            <span>Max side</span>
+            <input className="border rounded px-2 py-1 w-24 text-sm" type="number" min={512} max={4096} value={maxSide} onChange={e=>setMaxSide(Number(e.target.value||0))} />
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={crop} onChange={e=>setCrop(e.target.checked)} /> Crop
+          </label>
+          <button onClick={()=>setTheme(t=> t==='dark'?'light':'dark')} className="px-2 py-1 border rounded text-sm">
+            {theme==='dark' ? 'Light' : 'Dark'}
+          </button>
+          <button onClick={onSubmit} disabled={!canSubmit} className="px-3 py-2 bg-indigo-600 text-white rounded disabled:opacity-50">
+            {isLoading ? 'Processing…' : 'Remove background'}
+          </button>
+          {file && <button onClick={onRemove} className="px-3 py-2 border rounded">Clear</button>}
+        </div>
+      </header>
 
-      <div style={{ display: 'flex', gap: 16, alignItems: 'center', margin: '16px 0', flexWrap: 'wrap' }}>
-        <input ref={inputRef} type="file" accept="image/*" onChange={onSelectFile} />
-        {file && (
-          <button onClick={onRemove} disabled={isLoading}>Clear</button>
-        )}
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <input type="checkbox" checked={crop} onChange={(e) => setCrop(e.target.checked)} />
-          Crop transparent borders
-        </label>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          Max side:
-          <input type="number" min={256} max={4096} value={maxSide} onChange={e => setMaxSide(Number(e.target.value || 0))} style={{ width: 90 }} />
-        </label>
-        <button onClick={onSubmit} disabled={!canSubmit}>
-          {isLoading ? 'Processing…' : 'Remove background'}
-        </button>
-      </div>
-
-      <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+      <div className="grid md:grid-cols-2 gap-6">
         <div>
-          <h3>Input</h3>
-          <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 8, minHeight: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#fafafa' }}>
+          <h3 className="font-medium mb-2">Input</h3>
+          <div className="border rounded-lg min-h-[260px] bg-white dark:bg-slate-800 shadow-card flex items-center justify-center p-4">
             {previewUrl ? (
-              <img src={previewUrl} style={{ maxWidth: '100%', maxHeight: 400 }} />
+              <img src={previewUrl} className="max-w-full max-h-[480px]" />
             ) : (
-              <span style={{ color: '#999' }}>No image selected</span>
+              <label className="flex flex-col items-center justify-center gap-2 text-slate-500 cursor-pointer">
+                <input ref={inputRef} type="file" accept="image/*" onChange={onSelectFile} className="hidden" />
+                <span className="text-sm">Click to upload image</span>
+              </label>
             )}
           </div>
         </div>
         <div>
-          <h3>Result</h3>
-          <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 8, minHeight: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'repeating-conic-gradient(#eee 0% 25%, transparent 0% 50%) 50% / 20px 20px' }}>
+          <h3 className="font-medium mb-2">Result</h3>
+          <div className="border rounded-lg min-h-[260px] bg-[conic-gradient(#eee_0_25%,transparent_0_50%)] dark:bg-[conic-gradient(#1f2937_0_25%,transparent_0_50%)] [background-size:20px_20px] shadow-card flex items-center justify-center p-4">
             {resultUrl ? (
-              <img src={resultUrl} style={{ maxWidth: '100%', maxHeight: 400 }} />
+              <img src={resultUrl} className="max-w-full max-h-[480px]" />
             ) : (
-              <span style={{ color: '#999' }}>No result yet</span>
+              <span className="text-slate-500 text-sm">No result yet</span>
             )}
           </div>
           {resultUrl && (
-            <div style={{ marginTop: 8 }}>
-              <a href={resultUrl} download={`output.png`}>
-                <button>Download PNG</button>
-              </a>
+            <div className="mt-3 flex gap-2">
+              <a href={resultUrl} download={`output.png`} className="px-3 py-2 bg-green-600 text-white rounded">Download PNG</a>
+              <button onClick={()=>{ URL.revokeObjectURL(resultUrl); setResultUrl(null) }} className="px-3 py-2 border rounded">Reset result</button>
             </div>
           )}
         </div>
       </div>
-
-      <p style={{ marginTop: 24, color: '#777', fontSize: 12 }}>Backend: {API_BASE}</p>
     </div>
   )
 }

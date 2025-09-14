@@ -1,3 +1,4 @@
+# app.py
 from io import BytesIO
 import asyncio
 import os
@@ -5,6 +6,7 @@ import logging
 import time
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.responses import StreamingResponse
@@ -12,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 from rembg import remove, new_session
 
-app = FastAPI(title="Remove Background API", version="8.2.0")
+# --- App setup ---
+app = FastAPI(title="Remove Background API (Transparent PNG)", version="1.0.0")
 logger = logging.getLogger("uvicorn.error")
+logging.basicConfig(level=logging.INFO)
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,172 +27,182 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Sessions
+# --- Model sessions ---
 SESSIONS = {
-    "u2netp": new_session("u2netp"),            # fastest
-    "u2net": new_session("u2net"),              # balanced
-    "isnet-general-use": new_session("isnet-general-use"),  # best for objects
-    "u2net_human_seg": new_session("u2net_human_seg"),
+    "u2netp": new_session("u2netp"),
+    "u2net": new_session("u2net"),
+    "isnet-general-use": new_session("isnet-general-use"),
+    "birefnet-general": new_session("birefnet-general"),
 }
-DEFAULT_SESSION = SESSIONS["isnet-general-use"]  # best general object model
+try:
+    SESSIONS["birefnet-massive"] = new_session("birefnet-massive")
+except Exception:
+    logger.info("birefnet-massive not available")
+
+DEFAULT_MODEL = os.getenv("DEFAULT_REMBG_MODEL", "birefnet-general")
+DEFAULT_SESSION = SESSIONS.get(DEFAULT_MODEL, next(iter(SESSIONS.values())))
 
 EXECUTOR = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
-# Presets
+# --- Presets ---
 PRESETS = {
     "fast": {"model": "u2netp", "max_side": 640, "matting": False},
     "balanced": {"model": "u2net", "max_side": 1280, "matting": False},
-    "quality": {"model": "isnet-general-use", "max_side": 2048, "matting": True},
+    "quality": {"model": DEFAULT_MODEL, "max_side": 2048, "matting": True},
 }
 
-# Cache
-CG_CACHE: dict[str, bytes] = {}
+CACHE: dict[str, bytes] = {}
 
-# Warmup
 @app.on_event("startup")
-async def warmup():
+async def startup_warmup():
     tiny = Image.new("RGBA", (2, 2), (0, 0, 0, 0))
     buf = BytesIO()
     tiny.save(buf, format="PNG")
-    await asyncio.to_thread(remove, buf.getvalue(), session=DEFAULT_SESSION)
+    try:
+        await asyncio.to_thread(remove, buf.getvalue(), session=DEFAULT_SESSION)
+        logger.info("Rembg warmup complete.")
+    except Exception as e:
+        logger.warning(f"Rembg warmup failed: {e}")
 
-# Helpers
+
+# ----------------- Helpers -----------------
 def _ensure_rgba(img: Image.Image) -> Image.Image:
     return img.convert("RGBA") if img.mode != "RGBA" else img
 
-def get_hash(data: bytes) -> str:
+def _hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-def refine_alpha(mask: Image.Image, blur_radius=3, contract=1, expand=3) -> Image.Image:
-    """Refine alpha edges like remove.bg for smoother borders"""
-    mask = mask.convert("L")
+def _refine_alpha(mask: Image.Image, contract: int = 1, expand: int = 2, small_blur: float = 1.0, boost_dark_edges: bool = True) -> Image.Image:
+    a = mask.convert("L")
     if contract > 0:
-        mask = mask.filter(ImageFilter.MinFilter(contract * 2 + 1))
+        a = a.filter(ImageFilter.MinFilter(contract * 2 + 1))
     if expand > 0:
-        mask = mask.filter(ImageFilter.MaxFilter(expand * 2 + 1))
-    if blur_radius > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(blur_radius))
-    return mask
+        a = a.filter(ImageFilter.MaxFilter(expand * 2 + 1))
+    if small_blur > 0:
+        a = a.filter(ImageFilter.GaussianBlur(small_blur))
 
-def despill(image: Image.Image) -> Image.Image:
-    """Remove color spill/halo around edges"""
-    image = _ensure_rgba(image)
-    r, g, b, a = image.split()
-    base = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    if boost_dark_edges:
+        px = a.load()
+        for y in range(a.height):
+            for x in range(a.width):
+                v = px[x, y]
+                if v < 64:
+                    px[x, y] = min(255, int(v * 1.4) + 6)
+    return a
+
+def _premultiply_and_clean(img: Image.Image) -> Image.Image:
+    img = _ensure_rgba(img)
+    r, g, b, a = img.split()
     r = ImageChops.multiply(r, a)
     g = ImageChops.multiply(g, a)
     b = ImageChops.multiply(b, a)
     return Image.merge("RGBA", (r, g, b, a))
 
-def crop_with_margin(image: Image.Image, margin=10) -> Image.Image:
-    alpha = image.split()[-1]
+def _crop_with_margin(img: Image.Image, margin: int = 10) -> Image.Image:
+    alpha = img.split()[-1]
     bbox = alpha.getbbox()
     if not bbox:
-        return image
+        return img
     left, top, right, bottom = bbox
     left = max(left - margin, 0)
     top = max(top - margin, 0)
-    right = min(right + margin, image.width)
-    bottom = min(bottom + margin, image.height)
-    cropped = image.crop((left, top, right, bottom))
+    right = min(right + margin, img.width)
+    bottom = min(bottom + margin, img.height)
+    cropped = img.crop((left, top, right, bottom))
     return ImageOps.expand(cropped, border=margin, fill=(0, 0, 0, 0))
 
-# Endpoint
+
+# ----------------- Main Endpoint -----------------
 @app.post("/remove-bg", response_class=StreamingResponse)
 async def remove_bg(
     file: UploadFile = File(...),
-    crop: bool = Query(True),
-    crop_margin: int = Query(10, ge=0, le=50),
     preset: str = Query("quality", pattern="^(fast|balanced|quality)$"),
+    size: str = Query("auto", pattern="^(auto|preview|full)$"),
+    model: Optional[str] = Query(None),
     refine: bool = Query(True),
     apply_despill: bool = Query(True),
+    boost_dark_edges: bool = Query(True),
+    crop: bool = Query(True),
+    crop_margin: int = Query(10, ge=0, le=200),
 ):
-    try:
-        start = time.perf_counter()
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Empty file uploaded")
+    start = time.perf_counter()
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file uploaded")
 
-        # Cache
-        h = get_hash(contents)
-        if h in CG_CACHE:
-            buffer = BytesIO(CG_CACHE[h])
-            buffer.seek(0)
-            return StreamingResponse(buffer, media_type="image/png")
+    cache_key = _hash_bytes(contents + f"{preset}:{size}:{model}:{refine}:{apply_despill}:{boost_dark_edges}:{crop}:{crop_margin}".encode())
+    if cache_key in CACHE:
+        buf = BytesIO(CACHE[cache_key])
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/png")
 
-        # Preset
-        cfg = PRESETS[preset]
-        model_name = cfg["model"]
-        max_side = cfg["max_side"]
-        use_matting = cfg["matting"]
+    chosen = model or PRESETS.get(preset, PRESETS["quality"])["model"]
+    if chosen not in SESSIONS:
+        raise HTTPException(status_code=400, detail=f"Model '{chosen}' is not available")
 
-        # Load image
-        original = Image.open(BytesIO(contents)).convert("RGBA")
-        ow, oh = original.size
+    session = SESSIONS[chosen]
+    preset_cfg = PRESETS.get(preset, PRESETS["quality"])
+    max_side = preset_cfg["max_side"]
 
-        # Resize for speed
-        scale = 1.0
-        img_proc = original
-        if max(ow, oh) > max_side:
-            scale = max_side / max(ow, oh)
-            img_proc = original.resize((int(ow*scale), int(oh*scale)), Image.LANCZOS)
+    original = Image.open(BytesIO(contents)).convert("RGBA")
+    ow, oh = original.size
 
-        # Remove background
-        buf_proc = BytesIO()
-        img_proc.save(buf_proc, format="PNG")
-        session = SESSIONS[model_name]
+    if size == "preview":
+        proc_max_side = min(512, max_side)
+    elif size == "full":
+        proc_max_side = max(ow, oh)
+    else:
+        proc_max_side = max_side
 
-        loop = asyncio.get_running_loop()
-        removed_bytes = await loop.run_in_executor(
-            EXECUTOR,
-            lambda: remove(
-                buf_proc.getvalue(),
-                session=session,
-                only_mask=False,
-                alpha_matting=use_matting,
-                alpha_matting_foreground_threshold=240,
-                alpha_matting_background_threshold=10,
-                alpha_matting_erode_size=2,
-            ),
+    scale = 1.0
+    proc_img = original
+    if max(ow, oh) > proc_max_side and proc_max_side > 0:
+        scale = proc_max_side / float(max(ow, oh))
+        new_w = int(round(ow * scale))
+        new_h = int(round(oh * scale))
+        proc_img = original.resize((new_w, new_h), Image.LANCZOS)
+
+    data = BytesIO()
+    proc_img.save(data, format="PNG")
+    data_bytes = data.getvalue()
+
+    loop = asyncio.get_running_loop()
+    removed_bytes = await loop.run_in_executor(
+        EXECUTOR,
+        lambda: remove(
+            data_bytes,
+            session=session,
+            only_mask=False,
+            alpha_matting=True,
+            alpha_matting_foreground_threshold=245,
+            alpha_matting_background_threshold=10,
+            alpha_matting_erode_size=3,
         )
+    )
 
-        removed = Image.open(BytesIO(removed_bytes)).convert("RGBA")
-        r, g, b, a = removed.split()
+    removed = Image.open(BytesIO(removed_bytes)).convert("RGBA")
+    r, g, b, a = removed.split()
+    if scale != 1.0:
+        a = a.resize((ow, oh), Image.NEAREST)
 
-        # Upscale alpha
-        if scale != 1.0:
-            a = a.resize((ow, oh), Image.LANCZOS)
+    if refine:
+        a = _refine_alpha(a, contract=1, expand=2, small_blur=1.0, boost_dark_edges=boost_dark_edges)
 
-        # Transparent canvas
-        out = Image.new("RGBA", original.size, (0, 0, 0, 0))
+    out = Image.new("RGBA", original.size, (0,0,0,0))
+    out = Image.composite(original, out, a)
 
-        # Refine edges
-        if refine:
-            a = refine_alpha(a, blur_radius=3, contract=1, expand=3)
+    if apply_despill:
+        out = _premultiply_and_clean(out)
 
-        # Composite
-        out = Image.composite(original, out, a)
+    if crop:
+        out = _crop_with_margin(out, crop_margin)
 
-        # Despill
-        if apply_despill:
-            out = despill(out)
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+    buf.seek(0)
+    CACHE[cache_key] = buf.getvalue()
+    return StreamingResponse(buf, media_type="image/png")
 
-        # Crop
-        if crop:
-            out = crop_with_margin(out, crop_margin)
-
-        # Save & cache
-        buffer = BytesIO()
-        out.save(buffer, format="PNG")
-        buffer.seek(0)
-        CG_CACHE[h] = buffer.getvalue()
-
-        logger.info(f"/remove-bg done in {time.perf_counter()-start:.2f}s")
-        return StreamingResponse(buffer, media_type="image/png")
-
-    except Exception as e:
-        logger.exception("/remove-bg failed")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health():
