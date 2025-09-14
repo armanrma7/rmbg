@@ -27,22 +27,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Model sessions ---
-SESSIONS = {
-    "u2netp": new_session("u2netp"),
-    "u2net": new_session("u2net"),
-    "isnet-general-use": new_session("isnet-general-use"),
-    "birefnet-general": new_session("birefnet-general"),
-}
-try:
-    SESSIONS["birefnet-massive"] = new_session("birefnet-massive")
-except Exception:
-    logger.info("birefnet-massive not available")
+# --- Model sessions (Lazy Loading for Memory) ---
+SESSIONS: dict[str, object] = {}
+DEFAULT_MODEL = os.getenv("DEFAULT_REMBG_MODEL", "isnet-general-use")
 
-DEFAULT_MODEL = os.getenv("DEFAULT_REMBG_MODEL", "birefnet-general")
-DEFAULT_SESSION = SESSIONS.get(DEFAULT_MODEL, next(iter(SESSIONS.values())))
+def get_session(model_name: str = DEFAULT_MODEL) -> object:
+    """Lazy load sessions to save memory"""
+    if model_name not in SESSIONS:
+        SESSIONS[model_name] = new_session(model_name)
+    return SESSIONS[model_name]
 
-EXECUTOR = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+EXECUTOR = ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 2))  # Limit workers for memory
 
 # --- Presets ---
 PRESETS = {
@@ -53,16 +48,7 @@ PRESETS = {
 
 CACHE: dict[str, bytes] = {}
 
-@app.on_event("startup")
-async def startup_warmup():
-    tiny = Image.new("RGBA", (2, 2), (0, 0, 0, 0))
-    buf = BytesIO()
-    tiny.save(buf, format="PNG")
-    try:
-        await asyncio.to_thread(remove, buf.getvalue(), session=DEFAULT_SESSION)
-        logger.info("Rembg warmup complete.")
-    except Exception as e:
-        logger.warning(f"Rembg warmup failed: {e}")
+# Removed warmup to save memory - models load on first use
 
 
 # ----------------- Helpers -----------------
@@ -154,18 +140,22 @@ async def remove_bg(
     else:
         proc_max_side = max_side
 
+    # Memory optimization: limit processing size
     scale = 1.0
     proc_img = original
-    if max(ow, oh) > proc_max_side and proc_max_side > 0:
-        scale = proc_max_side / float(max(ow, oh))
+    max_processing = min(proc_max_side, 1200)  # Cap at 1200px for memory
+    if max(ow, oh) > max_processing and max_processing > 0:
+        scale = max_processing / float(max(ow, oh))
         new_w = int(round(ow * scale))
         new_h = int(round(oh * scale))
         proc_img = original.resize((new_w, new_h), Image.LANCZOS)
 
     data = BytesIO()
-    proc_img.save(data, format="PNG")
+    proc_img.save(data, format="PNG", optimize=True)  # Memory optimization
     data_bytes = data.getvalue()
 
+    # Use lazy session loading
+    session = get_session(DEFAULT_MODEL)
     loop = asyncio.get_running_loop()
     removed_bytes = await loop.run_in_executor(
         EXECUTOR,
@@ -198,9 +188,13 @@ async def remove_bg(
         out = _crop_with_margin(out, crop_margin)
 
     buf = BytesIO()
-    out.save(buf, format="PNG")
+    out.save(buf, format="PNG", optimize=True, compress_level=6)  # Memory optimization
     buf.seek(0)
     CACHE[cache_key] = buf.getvalue()
+    
+    # Clear large objects from memory
+    del original, removed, out, a
+    
     return StreamingResponse(buf, media_type="image/png")
 
 
