@@ -1,17 +1,19 @@
-spec:
-  name: remove-bg-api
-  services:
-    - name: api
-      environment_slug: python
-      instance_size_slug: basic-xxs
-      region: fra
-      dockerfile_path: Dockerfile
-      source_dir: .
-      http_port: 8080
-      routes:
-        - path: /
-      github:
-        # Auto-deploy on push; fill in your repo details when connecting
-        branch: master
-        deploy_on_push: true
+name: remove-bg-api
+region: fra # or nyc, sgp etc.
 
+services:
+  - name: api
+    environment_slug: python
+    instance_size_slug: basic-xxs  # cheapest, adjust if needed
+    instance_count: 1
+    run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
+    http_port: $PORT
+    envs:
+      - key: PORT
+        value: "8080"
+      - key: DEFAULT_REMBG_MODEL
+        value: birefnet-general
+    github:
+      repo: https://github.com/armanrma7/rmbg.git
+      branch: main
+      deploy_on_push: true
