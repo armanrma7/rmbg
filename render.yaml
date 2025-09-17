@@ -1,7 +1,19 @@
+name: remove-bg-api
+region: fra # or nyc, sgp etc.
+
 services:
-  - type: web
-    name: background-remover
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
-    plan: free
+  - name: api
+    environment_slug: python
+    instance_size_slug: basic-xxs  # cheapest, adjust if needed
+    instance_count: 1
+    run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
+    http_port: $PORT
+    envs:
+      - key: PORT
+        value: "8080"
+      - key: DEFAULT_REMBG_MODEL
+        value: birefnet-general
+    github:
+      repo: your-github-username/your-repo
+      branch: main
+      deploy_on_push: true

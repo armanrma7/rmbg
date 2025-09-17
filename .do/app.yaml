@@ -1,10 +1,10 @@
 name: remove-bg-api
-region: fra # or nyc, sgp etc.
+region: fra # your preferred region
 
 services:
   - name: api
     environment_slug: python
-    instance_size_slug: basic-xxs  # cheapest, adjust if needed
+    instance_size_slug: basic-xxs
     instance_count: 1
     run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
     http_port: $PORT
@@ -14,6 +14,6 @@ services:
       - key: DEFAULT_REMBG_MODEL
         value: birefnet-general
     github:
-      repo: https://github.com/armanrma7/rmbg.git
+      repo: your-github-username/your-repo
       branch: main
       deploy_on_push: true
