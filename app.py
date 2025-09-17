@@ -29,7 +29,7 @@ app.add_middleware(
 
 # --- Model sessions (Lazy Loading for Memory) ---
 SESSIONS: dict[str, object] = {}
-DEFAULT_MODEL = os.getenv("DEFAULT_REMBG_MODEL", "isnet-general-use")
+DEFAULT_MODEL = os.getenv("DEFAULT_REMBG_MODEL", "birefnet-general")
 
 def get_session(model_name: str = DEFAULT_MODEL) -> object:
     """Lazy load sessions to save memory"""
@@ -123,10 +123,12 @@ async def remove_bg(
         return StreamingResponse(buf, media_type="image/png")
 
     chosen = model or PRESETS.get(preset, PRESETS["quality"])["model"]
-    if chosen not in SESSIONS:
-        raise HTTPException(status_code=400, detail=f"Model '{chosen}' is not available")
 
-    session = SESSIONS[chosen]
+    # Use lazy session loading instead of checking SESSIONS dict
+    try:
+        session = get_session(chosen)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Model '{chosen}' failed to load: {str(e)}")
     preset_cfg = PRESETS.get(preset, PRESETS["quality"])
     max_side = preset_cfg["max_side"]
 
@@ -154,8 +156,7 @@ async def remove_bg(
     proc_img.save(data, format="PNG", optimize=True)  # Memory optimization
     data_bytes = data.getvalue()
 
-    # Use lazy session loading
-    session = get_session(DEFAULT_MODEL)
+    # Use the already loaded session
     loop = asyncio.get_running_loop()
     removed_bytes = await loop.run_in_executor(
         EXECUTOR,
@@ -191,13 +192,18 @@ async def remove_bg(
     out.save(buf, format="PNG", optimize=True, compress_level=6)  # Memory optimization
     buf.seek(0)
     CACHE[cache_key] = buf.getvalue()
-    
+
     # Clear large objects from memory
     del original, removed, out, a
-    
+
     return StreamingResponse(buf, media_type="image/png")
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
