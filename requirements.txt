@@ -6,4 +6,6 @@ onnxruntime>=1.18.0; platform_system != "Darwin" or platform_machine != "arm64"
 onnxruntime-silicon>=1.18.0; platform_system == "Darwin" and platform_machine == "arm64"
 python-multipart>=0.0.9
 opencv-python-headless>=4.9.0.80
-
+transparent-background>=0.3.6
+numpy<2
+torch==2.2.0

@@ -40,10 +40,23 @@ export default function App() {
   const [maxSide, setMaxSide] = useState<number>(() => Number(localStorage.getItem('maxSide')) || 1600)
   const [preset, setPreset] = useState<'fast'|'balanced'|'quality'>(() => (localStorage.getItem('preset') as any) || 'quality')
   const [apiBase, setApiBase] = useState<string>(API_BASE)
-  const [theme, setTheme] = useState<'light'|'dark'>(() => (localStorage.getItem('theme') as any) || 'light')
+  const [engine, setEngine] = useState<'rembg'|'tb'>(() => (localStorage.getItem('engine') as any) || 'rembg')
+  const [tbMode, setTbMode] = useState<'fast'|'base'|'base-nightly'>(() => (localStorage.getItem('tbMode') as any) || 'fast')
+  const [tbResize, setTbResize] = useState<'static'|'dynamic'>(() => (localStorage.getItem('tbResize') as any) || 'static')
+  const [cropMargin, setCropMargin] = useState<number>(() => Number(localStorage.getItem('cropMargin')) || 12)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   const canSubmit = useMemo(() => !!file && !isLoading, [file, isLoading])
+
+  useEffect(() => {
+    localStorage.setItem('maxSide', String(maxSide))
+    localStorage.setItem('preset', preset)
+    localStorage.setItem('apiBase', apiBase)
+    localStorage.setItem('engine', engine)
+    localStorage.setItem('tbMode', tbMode)
+    localStorage.setItem('tbResize', tbResize)
+    localStorage.setItem('cropMargin', String(cropMargin))
+  }, [maxSide, preset, apiBase, engine, tbMode, tbResize, cropMargin])
 
   const onSelectFile: React.ChangeEventHandler<HTMLInputElement> = (e) => {
     const f = e.target.files?.[0] || null
@@ -61,14 +74,6 @@ export default function App() {
     inputRef.current?.value && (inputRef.current.value = '')
   }
 
-  useEffect(() => {
-    localStorage.setItem('maxSide', String(maxSide))
-    localStorage.setItem('preset', preset)
-    localStorage.setItem('apiBase', apiBase)
-    localStorage.setItem('theme', theme)
-    document.documentElement.classList.toggle('dark', theme === 'dark')
-  }, [maxSide, preset, apiBase, theme])
-
   const onSubmit = async () => {
     if (!file) return
     setIsLoading(true)
@@ -77,21 +82,32 @@ export default function App() {
       const prepared = await downscaleImage(file, maxSide)
       const form = new FormData()
       form.append('file', prepared)
-      const params = new URLSearchParams({
-        crop: String(crop),
-        preset,
-        max_side: String(maxSide),
-        refine: 'true',
-        boost_dark_edges: 'true',
-        despill_edges: 'true',
-        edge_contract: '2',
-        edge_feather: '1.6'
-      })
-      const url = `${apiBase}/remove-bg?${params.toString()}`
-      const res = await fetch(url, {
-        method: 'POST',
-        body: form,
-      })
+
+      let url = ''
+      if (engine === 'rembg') {
+        const params = new URLSearchParams({
+          crop: String(crop),
+          preset,
+          max_side: String(maxSide),
+          refine: 'true',
+          boost_dark_edges: 'true',
+          despill_edges: 'true',
+          edge_contract: '2',
+          edge_feather: '1.6'
+        })
+        url = `${apiBase}/remove-bg?${params.toString()}`
+      } else {
+        const params = new URLSearchParams({
+          mode: tbMode,
+          resize: tbResize,
+          output_type: 'rgba',
+          crop: String(crop),
+          crop_margin: String(cropMargin)
+        })
+        url = `${apiBase}/remove-bg-tb?${params.toString()}`
+      }
+
+      const res = await fetch(url, { method: 'POST', body: form })
       if (!res.ok) throw new Error(`Request failed: ${res.status}`)
       const blob = await res.blob()
       const objectUrl = URL.createObjectURL(blob)
@@ -109,21 +125,42 @@ export default function App() {
         <h1 className="text-2xl font-semibold">Remove Background</h1>
         <div className="flex flex-wrap gap-2 items-center">
           <input className="border rounded px-2 py-1 text-sm w-64" placeholder="API base" value={apiBase} onChange={e=>setApiBase(e.target.value)} />
-          <select className="border rounded px-2 py-1 text-sm" value={preset} onChange={e=>setPreset(e.target.value as any)}>
-            <option value="fast">Fast</option>
-            <option value="balanced">Balanced</option>
-            <option value="quality">Quality</option>
+          <select className="border rounded px-2 py-1 text-sm" value={engine} onChange={e=>setEngine(e.target.value as any)}>
+            <option value="rembg">Rembg</option>
+            <option value="tb">Transparent-Background</option>
           </select>
-          <label className="flex items-center gap-2 text-sm">
-            <span>Max side</span>
-            <input className="border rounded px-2 py-1 w-24 text-sm" type="number" min={512} max={4096} value={maxSide} onChange={e=>setMaxSide(Number(e.target.value||0))} />
-          </label>
+          {engine === 'rembg' ? (
+            <>
+              <select className="border rounded px-2 py-1 text-sm" value={preset} onChange={e=>setPreset(e.target.value as any)}>
+                <option value="fast">Fast</option>
+                <option value="balanced">Balanced</option>
+                <option value="quality">Quality</option>
+              </select>
+              <label className="flex items-center gap-2 text-sm">
+                <span>Max side</span>
+                <input className="border rounded px-2 py-1 w-24 text-sm" type="number" min={512} max={4096} value={maxSide} onChange={e=>setMaxSide(Number(e.target.value||0))} />
+              </label>
+            </>
+          ) : (
+            <>
+              <select className="border rounded px-2 py-1 text-sm" value={tbMode} onChange={e=>setTbMode(e.target.value as any)}>
+                <option value="fast">TB Fast</option>
+                <option value="base">TB Base</option>
+                <option value="base-nightly">TB Nightly</option>
+              </select>
+              <select className="border rounded px-2 py-1 text-sm" value={tbResize} onChange={e=>setTbResize(e.target.value as any)}>
+                <option value="static">Static</option>
+                <option value="dynamic">Dynamic</option>
+              </select>
+              <label className="flex items-center gap-2 text-sm">
+                <span>Crop margin</span>
+                <input className="border rounded px-2 py-1 w-20 text-sm" type="number" min={0} max={200} value={cropMargin} onChange={e=>setCropMargin(Number(e.target.value||0))} />
+              </label>
+            </>
+          )}
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={crop} onChange={e=>setCrop(e.target.checked)} /> Crop
           </label>
-          <button onClick={()=>setTheme(t=> t==='dark'?'light':'dark')} className="px-2 py-1 border rounded text-sm">
-            {theme==='dark' ? 'Light' : 'Dark'}
-          </button>
           <button onClick={onSubmit} disabled={!canSubmit} className="px-3 py-2 bg-indigo-600 text-white rounded disabled:opacity-50">
             {isLoading ? 'Processing…' : 'Remove background'}
           </button>
