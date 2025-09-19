@@ -1,13 +1,7 @@
-# Core
 fastapi==0.115.0
-uvicorn==0.30.6
+uvicorn[standard]==0.30.6
 pillow==10.4.0
 python-multipart>=0.0.9
+backgroundremover==0.2.2
+torch==2.2.0
 numpy<2
-
-# CPU-only PyTorch (smaller footprint)
-torch==2.2.0+cpu
-torchvision==0.17.0+cpu
-
-# Transparent background (use fast mode to reduce RAM)
-transparent-background>=0.3.6
