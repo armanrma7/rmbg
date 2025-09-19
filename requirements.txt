@@ -3,4 +3,5 @@ uvicorn[standard]==0.30.6
 pillow==10.4.0
 rembg==2.0.67
 onnxruntime
+python-multipart
 numpy<2
